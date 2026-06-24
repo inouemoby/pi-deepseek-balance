@@ -1,0 +1,13 @@
+{
+  "name": "deepseek-usage",
+  "version": "1.0.0",
+  "description": "DeepSeek API balance monitor for pi coding agent. Shows remaining credits in footer.",
+  "keywords": ["pi-package"],
+  "main": "index.ts",
+  "dependencies": {
+    "typebox": "^0.32.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
