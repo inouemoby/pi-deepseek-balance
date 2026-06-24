@@ -1,5 +1,5 @@
 {
-  "name": "deepseek-usage",
+  "name": "pi-deepseek-balance",
   "version": "1.0.0",
   "description": "DeepSeek API balance monitor for pi coding agent. Shows remaining credits in footer.",
   "keywords": ["pi-package"],

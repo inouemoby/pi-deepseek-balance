@@ -20,7 +20,6 @@ interface BalanceData {
 }
 
 interface UsageData {
-  // Prefer CNY if available, else first currency
   currency: string;
   total: number;
   granted: number;
@@ -41,9 +40,20 @@ function getApiKey(): string {
   return "";
 }
 
-function humanNum(n: number): string {
-  if (n >= 1000) return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
-  return n.toFixed(2);
+function formatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1e6) return `${Math.round(count / 1000)}k`;
+  if (count < 1e7) return `${(count / 1e6).toFixed(1)}M`;
+  return `${Math.round(count / 1e6)}M`;
+}
+
+/** Returns severity: 0=normal, 1=low balance, 2=critical/insufficient */
+function balanceSeverity(total: number, isAvailable: boolean): number {
+  if (!isAvailable) return 2;
+  if (total < 1) return 2;
+  if (total < 5) return 1;
+  return 0;
 }
 
 // ─── Fetch ───────────────────────────────────────────────────────
@@ -54,7 +64,6 @@ async function fetchBalance(apiKey: string): Promise<UsageData> {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const json = (await resp.json()) as BalanceData;
 
-  // Prefer CNY, fallback to first entry
   const info =
     json.balance_infos?.find((b) => b.currency === "CNY") ||
     json.balance_infos?.[0];
@@ -69,14 +78,6 @@ async function fetchBalance(apiKey: string): Promise<UsageData> {
     isAvailable: json.is_available,
     _ts: Date.now(),
   };
-}
-
-function formatTokens(count: number): string {
-  if (count < 1000) return String(count);
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1e6) return `${Math.round(count / 1000)}k`;
-  if (count < 1e7) return `${(count / 1e6).toFixed(1)}M`;
-  return `${Math.round(count / 1e6)}M`;
 }
 
 // ─── Main ────────────────────────────────────────────────────────
@@ -94,65 +95,20 @@ export default function (pi: ExtensionAPI) {
     return usage;
   }
 
-  function isDeepSeek(ctx: any): boolean {
-    const p = ctx.model?.provider?.toLowerCase() ?? "";
-    return p === "deepseek" || p.includes("deepseek");
-  }
+  function isDeepSeek(ctx: any) { return ctx.model?.provider === "deepseek"; }
   function trigger() { if (_tui) setTimeout(() => _tui.requestRender?.(), 0); }
-
-  // ── Build usage summary string ────────────────────────────
-  function usageSummary(): string {
-    if (!usage) return "";
-    const cur = usage.currency;
-    const sev = !usage.isAvailable ? "⚠⚠" : usage.total < 1 ? "⚠" : "";
-    return `${sev}DS:${humanNum(usage.total)}${cur}`;
-  }
-
-  // ── Update all display surfaces ───────────────────────────
-  function updateAll(ctx: any) {
-    if (!ctx || !ctx.ui) return;
-
-    // 1. TUI footer
-    toggleFooter(ctx);
-
-    // 2. Status line (works in both TUI and RPC mode)
-    if (isDeepSeek(ctx) && apiKey && usage) {
-      ctx.ui.setStatus("deepseek-usage", usageSummary());
-    } else {
-      ctx.ui.setStatus("deepseek-usage", undefined);
-    }
-
-    // 3. Widget as fallback
-    if (isDeepSeek(ctx) && apiKey && usage) {
-      const cur = usage.currency;
-      const lines: string[] = [
-        "─── DeepSeek Balance ───",
-        `Total: ${humanNum(usage.total)} ${cur}`,
-        `  Granted: ${humanNum(usage.granted)} ${cur}`,
-        `  Topped up: ${humanNum(usage.toppedUp)} ${cur}`,
-        `Available: ${usage.isAvailable ? "Yes" : "No (insufficient)"}`,
-      ];
-      ctx.ui.setWidget("deepseek-usage", lines);
-    } else {
-      ctx.ui.setWidget("deepseek-usage", undefined);
-    }
-  }
 
   // ── Refresh ─────────────────────────────────────────────────
   async function refresh(ctx: any) {
     if (!apiKey) return;
     if (!isDeepSeek(ctx)) {
-      if (usage) { usage = null; updateAll(ctx); }
+      if (usage) { usage = null; toggleFooter(ctx); }
       return;
     }
-    try {
-      await getUsage();
-      trigger();
-      updateAll(ctx);
-    } catch { /* silent */ }
+    try { await getUsage(); trigger(); } catch { /* silent */ }
   }
 
-  // ── Footer (TUI mode only) ────────────────────────────────
+  // ── Footer ──────────────────────────────────────────────────
   function toggleFooter(ctx: any) {
     if (isDeepSeek(ctx) && apiKey) {
       if (!footerOn) {
@@ -217,11 +173,14 @@ export default function (pi: ExtensionAPI) {
           else cpStr = `${cp}%/${formatTokens(cw)} (auto)`;
           parts.push(cpStr);
 
-          // DeepSeek balance
+          // DeepSeek balance (exclamation marks for severity)
           if (usage) {
-            const sev = !usage.isAvailable ? "!!" : usage.total < 1 ? "!" : "";
-            parts.push(`${sev}DS:${humanNum(usage.total)}${usage.currency}`);
+            const sev = balanceSeverity(usage.total, usage.isAvailable);
+            const flag = sev === 2 ? "!!" : sev === 1 ? "!" : "";
+            const cur = usage.currency === "CNY" ? "¥" : usage.currency === "USD" ? "$" : usage.currency + " ";
+            parts.push(`${flag}${cur}${usage.total.toFixed(2)}`);
           }
+
           let left = parts.join(" ");
 
           // Right side: model info
@@ -231,11 +190,10 @@ export default function (pi: ExtensionAPI) {
             const tl = thinkingLevel;
             right = tl === "off" ? `${right} • thinking off` : `${right} • ${tl}`;
           }
-          if (m) {
-            const withProv = `(${m.provider}) ${right}`;
-            if (visibleWidth(left) + 2 + visibleWidth(withProv) <= width) {
-              right = withProv;
-            }
+          // Always show provider label
+          const withProv = `(deepseek) ${right}`;
+          if (visibleWidth(left) + 2 + visibleWidth(withProv) <= width) {
+            right = withProv;
           }
 
           const lw = visibleWidth(left);
@@ -260,39 +218,32 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_e, ctx) => {
     apiKey = getApiKey();
     thinkingLevel = pi.getThinkingLevel?.() || "off";
-    updateAll(ctx);
+    toggleFooter(ctx);
     if (apiKey) refresh(ctx);
   });
 
-  pi.on("model_select", async (_e, ctx) => {
-    updateAll(ctx);
-    if (apiKey) refresh(ctx);
-  });
+  pi.on("model_select", async (_e, ctx) => { toggleFooter(ctx); if (apiKey) refresh(ctx); });
   pi.on("thinking_level_select", async (event: any) => { thinkingLevel = event.level || "off"; trigger(); });
-  pi.on("agent_end", async (_e, ctx) => {
-    if (!apiKey || !isDeepSeek(ctx)) return;
-    try {
-      await getUsage();
-      updateAll(ctx);
-      ctx.ui.notify(`DeepSeek: ${usageSummary()}`, "info");
-    } catch { /* silent */ }
-  });
+  pi.on("agent_end", async (_e, ctx) => { if (apiKey) refresh(ctx); });
 
-  // ── /ds command ──────────────────────────────────────────
-  pi.registerCommand("ds", {
+  // ── /deepseek ─────────────────────────────────────────────
+  pi.registerCommand("deepseek", {
     description: "Show DeepSeek API balance",
     handler: async (_args, ctx) => {
       try {
         const d = await getUsage();
         const cur = d.currency;
-        const lines = [
-          `══ DeepSeek Balance (${cur}) ══`,
-          `Total:     ${humanNum(d.total)} ${cur}`,
-          `Granted:   ${humanNum(d.granted)} ${cur}`,
-          `Topped up: ${humanNum(d.toppedUp)} ${cur}`,
-          `Status:    ${d.isAvailable ? "✓ Available" : "⚠ Insufficient balance"}`,
-        ];
-        ctx.ui.notify(lines.join("\n"), d.isAvailable ? "info" : "warning");
+        const fmt = (n: number) => n.toFixed(2);
+        ctx.ui.notify(
+          [
+            `══ DeepSeek Balance (${cur}) ══`,
+            `Total:     ${fmt(d.total)} ${cur}`,
+            `Granted:   ${fmt(d.granted)} ${cur}`,
+            `Topped up: ${fmt(d.toppedUp)} ${cur}`,
+            `Status:    ${d.isAvailable ? "✓ Available" : "⚠ Insufficient balance"}`,
+          ].join("\n"),
+          d.isAvailable ? "info" : "warning",
+        );
       } catch (err: any) {
         ctx.ui.notify(`DeepSeek: ${err.message}`, "error");
       }
@@ -303,14 +254,15 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "deepseek_usage",
     label: "DeepSeek Usage",
-    description: "Check DeepSeek API account balance and availability. Returns total/granted/topped-up balance in CNY and USD.",
+    description: "Check DeepSeek API account balance and availability. Returns total, granted, and topped-up balance.",
     promptSnippet: "Check DeepSeek API remaining balance",
     promptGuidelines: [
       "Use deepseek_usage to check DeepSeek API balance before expensive operations.",
       "Use deepseek_usage when the user asks about DeepSeek usage, limits, or remaining credits.",
+      "Proactively call deepseek_usage at the start of a task to ensure sufficient balance.",
     ],
     parameters: Type.Object({}),
-    async execute(_id: any, _p: any, _s: any, _up: any, _ctx: any) {
+    async execute(_id: any, _p: any, _s: any, _up: any, ctx: any) {
       try {
         const d = await getUsage();
         const result = {
