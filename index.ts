@@ -1,7 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
 import { homedir } from "os";
 import { join } from "path";
 import { readFileSync } from "fs";
@@ -250,35 +249,4 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ── deepseek_usage tool ──────────────────────────────────
-  pi.registerTool({
-    name: "deepseek_usage",
-    label: "DeepSeek Usage",
-    description: "Check DeepSeek API account balance and availability. Returns total, granted, and topped-up balance.",
-    promptSnippet: "Check DeepSeek API remaining balance",
-    promptGuidelines: [
-      "Use deepseek_usage to check DeepSeek API balance before expensive operations.",
-      "Use deepseek_usage when the user asks about DeepSeek usage, limits, or remaining credits.",
-      "Proactively call deepseek_usage at the start of a task to ensure sufficient balance.",
-    ],
-    parameters: Type.Object({}),
-    async execute(_id: any, _p: any, _s: any, _up: any, ctx: any) {
-      try {
-        const d = await getUsage();
-        const result = {
-          currency: d.currency,
-          total: d.total,
-          granted: d.granted,
-          toppedUp: d.toppedUp,
-          isAvailable: d.isAvailable,
-        };
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: result,
-        };
-      } catch (err: any) {
-        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
-      }
-    },
-  });
 }
