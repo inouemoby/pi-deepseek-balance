@@ -2,13 +2,12 @@
 
 DeepSeek API balance monitor extension for [pi coding agent](https://github.com/earendil-works/pi-mono).
 
-Displays DeepSeek account balance in pi's footer in real time. Also provides a `/deepseek` command and `deepseek_usage` tool for balance checks.
+Displays DeepSeek account balance in pi's footer in real time. Also provides a `/deepseek` command for balance checks.
 
 ## Features
 
 - **Footer integration**: Replaces pi's footer with token stats + `¥9.44` balance with exclamation mark alerts for low balance
 - **`/deepseek` command**: Detailed balance view (total / granted / topped-up / availability)
-- **`deepseek_usage` tool**: Proactively check remaining balance before expensive operations
 - **Auto-activates**: Only takes over the footer when using a deepseek provider model — doesn't affect other providers
 - **No login needed**: Reads API key from `auth.json` automatically
 
@@ -63,14 +62,6 @@ When using a DeepSeek model, the footer shows:
 
 - `¥9.44` — remaining balance in CNY (or `$` for USD)
 - `!` = balance below 5, `!!` = balance below 1 or insufficient
-
-## Tool: deepseek_usage
-
-The extension also registers a `deepseek_usage` tool that the AI can call:
-
-```
-Check DeepSeek API remaining balance
-```
 
 ## API
 
