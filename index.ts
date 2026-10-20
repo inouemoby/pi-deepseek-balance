@@ -84,8 +84,13 @@ export default function (pi: ExtensionAPI) {
   let apiKey = "";
   let usage: UsageData | null = null;
   let footerOn = false;
+  let footerGeneration = 0;
   let _tui: any = null;
   let thinkingLevel = "off";
+  const IDLE_REFRESH_MS = 5 * 60 * 1000;  // 闲时定时刷新: 5 分钟
+  let latestCtx: any = null;              // 最近一次事件拿到的 ctx,供定时器使用
+  let agentBusy = false;                  // agent 生成中 = true,定时刷新只在闲时执行
+  let idleTimer: ReturnType<typeof setInterval> | null = null;
 
   async function getUsage(): Promise<UsageData> {
     if (!apiKey) throw new Error("DeepSeek API key not found in auth.json");
@@ -95,7 +100,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   function isDeepSeek(ctx: any) { return ctx.model?.provider === "deepseek"; }
-  function trigger() { if (_tui) setTimeout(() => _tui.requestRender?.(), 0); }
+  function requestRenderSafe(tui: any): void {
+    try { tui?.requestRender?.(); } catch { /* footer may already be disposed */ }
+  }
+
+  function trigger() {
+    setTimeout(() => requestRenderSafe(_tui), 0);
+  }
 
   // ── Refresh ─────────────────────────────────────────────────
   async function refresh(ctx: any) {
@@ -108,9 +119,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Footer ──────────────────────────────────────────────────
-  function toggleFooter(ctx: any) {
+  function toggleFooter(ctx: any, force = false) {
     if (isDeepSeek(ctx) && apiKey) {
-      if (!footerOn) {
+      if (!footerOn || force) {
         ctx.ui.setFooter(buildFooter(ctx));
         footerOn = true;
       }
@@ -124,11 +135,22 @@ export default function (pi: ExtensionAPI) {
   }
 
   function buildFooter(ctx: any) {
+    const generation = ++footerGeneration;
     return (tui: any, theme: any, fd: any) => {
       _tui = tui;
-      const unsub = fd.onBranchChange(() => tui.requestRender());
+      const unsub = fd.onBranchChange(() => {
+        if (generation === footerGeneration) requestRenderSafe(tui);
+      });
       return {
-        dispose: () => { unsub(); _tui = null; },
+        // footer 可能被 pi 或其他扩展从外部 dispose(我们不知情),
+        // 必须同步 footerOn,并避免旧 footer 清理新 footer 的状态
+        dispose: () => {
+          try { unsub(); } catch { /* already disposed */ }
+          if (generation === footerGeneration) {
+            _tui = null;
+            footerOn = false;
+          }
+        },
         invalidate() {},
         render(width: number): string[] {
           const sm = ctx.sessionManager;
@@ -154,11 +176,14 @@ export default function (pi: ExtensionAPI) {
             }
           }
           const parts: string[] = [];
-          if (ti) parts.push(`↑${formatTokens(ti)}`);
-          if (to) parts.push(`↓${formatTokens(to)}`);
-          if (tr) parts.push(`R${formatTokens(tr)}`);
-          if (tw) parts.push(`W${formatTokens(tw)}`);
-          if (tc) parts.push(`$${tc.toFixed(3)}`);
+          const cachePartIndexes: number[] = [];
+          const tokenPartIndexes: number[] = [];
+          let costPartIndex = -1;
+          if (ti) { tokenPartIndexes.push(parts.length); parts.push(`↑${formatTokens(ti)}`); }
+          if (to) { tokenPartIndexes.push(parts.length); parts.push(`↓${formatTokens(to)}`); }
+          if (tr) { cachePartIndexes.push(parts.length); parts.push(`R${formatTokens(tr)}`); }
+          if (tw) { cachePartIndexes.push(parts.length); parts.push(`W${formatTokens(tw)}`); }
+          if (tc) { costPartIndex = parts.length; parts.push(`$${tc.toFixed(3)}`); }
 
           // Context %
           const cu = ctx.getContextUsage();
@@ -195,6 +220,21 @@ export default function (pi: ExtensionAPI) {
             right = withProv;
           }
 
+          // 宽度不足时的省略顺序 (与 pi-codex-usage 一致): 供应商名 → 缓存计数 → 费用 → 累计 token
+          const fits = () => visibleWidth(left) + 2 + visibleWidth(right) <= width;
+          if (!fits()) {
+            for (const index of cachePartIndexes) parts[index] = "";
+            left = parts.filter(Boolean).join(" ");
+          }
+          if (!fits() && costPartIndex >= 0) {
+            parts[costPartIndex] = "";
+            left = parts.filter(Boolean).join(" ");
+          }
+          if (!fits() && tokenPartIndexes.length > 0) {
+            for (const index of tokenPartIndexes) parts[index] = "";
+            left = parts.filter(Boolean).join(" ");
+          }
+
           const lw = visibleWidth(left);
           const rw = visibleWidth(right);
 
@@ -213,17 +253,64 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  // ── Idle timer (每 5 分钟闲时刷新) ───────────────────────
+  function startIdleTimer() {
+    stopIdleTimer();
+    idleTimer = setInterval(() => {
+      if (agentBusy) return;                    // 生成中,跳过本轮
+      const ctx = latestCtx;
+      if (!ctx || !isDeepSeek(ctx) || !apiKey) return;  // 只在对应 provider 下刷新
+      refresh(ctx);
+    }, IDLE_REFRESH_MS);
+    (idleTimer as any).unref?.();               // 不阻止进程退出
+  }
+
+  function stopIdleTimer() {
+    if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+  }
+
   // ── Events ─────────────────────────────────────────────────
   pi.on("session_start", async (_e, ctx) => {
+    latestCtx = ctx;
     apiKey = getApiKey();
     thinkingLevel = pi.getThinkingLevel?.() || "off";
-    toggleFooter(ctx);
+    footerOn = false;                            // 强制重建 footer,确保闭包捕获新 ctx
+    toggleFooter(ctx, true);
+    if (apiKey) refresh(ctx);
+    startIdleTimer();
+  });
+
+  pi.on("session_shutdown", async () => {
+    stopIdleTimer();
+    latestCtx = null;
+  });
+
+  pi.on("agent_start", async (_e, ctx) => { latestCtx = ctx; agentBusy = true; });
+  pi.on("agent_end", async (_e, ctx) => {
+    latestCtx = ctx;
+    agentBusy = false;
     if (apiKey) refresh(ctx);
   });
 
-  pi.on("model_select", async (_e, ctx) => { toggleFooter(ctx); if (apiKey) refresh(ctx); });
-  pi.on("thinking_level_select", async (event: any) => { thinkingLevel = event.level || "off"; trigger(); });
-  pi.on("agent_end", async (_e, ctx) => { if (apiKey) refresh(ctx); });
+  pi.on("model_select", async (_e, ctx) => {
+    latestCtx = ctx;
+    if (isDeepSeek(ctx)) {
+      // 延迟到 macrotask: 让排在我们后面的扩展先完成卸载,我们再挂载,避免被覆盖
+      setTimeout(() => {
+        const currentCtx = latestCtx;
+        if (!currentCtx || !isDeepSeek(currentCtx)) return;
+        try {
+          toggleFooter(currentCtx, true);
+          if (apiKey) refresh(currentCtx);
+        } catch { /* session or footer was disposed */ }
+      }, 0);
+    } else {
+      // 切走时立即卸载自己,给目标 provider 的扩展让位
+      toggleFooter(ctx);
+      if (apiKey) refresh(ctx);
+    }
+  });
+  pi.on("thinking_level_select", async (event: any) => { thinkingLevel = event?.level || "off"; trigger(); });
 
   // ── /deepseek ─────────────────────────────────────────────
   pi.registerCommand("deepseek", {
