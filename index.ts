@@ -81,6 +81,8 @@ async function fetchBalance(apiKey: string): Promise<UsageData> {
 
 // ─── Main ────────────────────────────────────────────────────────
 export default function (pi: ExtensionAPI) {
+  // Last footer usage line shared on pi.events for other extensions (e.g. pi-remotecontrol).
+  let lastPublishedFooterUsage = "";
   let apiKey = "";
   let usage: UsageData | null = null;
   let footerOn = false;
@@ -163,7 +165,16 @@ export default function (pi: ExtensionAPI) {
           if (branch) pwd += ` (${branch})`;
           const sname = sm.getSessionName?.();
           if (sname) pwd += ` • ${sname}`;
-          const ln1 = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+          // Extension statuses (e.g. pi-remotecontrol) right-aligned on the workspace line.
+          const statusText = [...(((fd as any)?.getExtensionStatuses?.()?.values?.() ?? []) as Iterable<string>)].filter(Boolean).join("  ");
+          const statusWidth = statusText ? visibleWidth(statusText) : 0;
+          let ln1: string;
+          if (statusWidth && statusWidth + 12 <= width) {
+            const left = truncateToWidth(theme.fg("dim", pwd), width - statusWidth - 2, theme.fg("dim", "..."));
+            ln1 = left + " ".repeat(Math.max(2, width - visibleWidth(left) - statusWidth)) + theme.fg("dim", statusText);
+          } else {
+            ln1 = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+          }
 
           // ── Line 2: stats ────────────────────────────────
           let ti = 0, to = 0, tr = 0, tw = 0, tc = 0;
@@ -247,6 +258,10 @@ export default function (pi: ExtensionAPI) {
             ln2 = truncateToWidth(left, width, "...");
           }
 
+          if (ln2 !== lastPublishedFooterUsage) {
+            lastPublishedFooterUsage = ln2;
+            pi.events.emit("pi-footer:usage", { source: "pi-deepseek-balance", text: ln2 });
+          }
           return [ln1, theme.fg("dim", ln2)];
         },
       };
